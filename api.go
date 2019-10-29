@@ -35,14 +35,14 @@ import (
 var (
 	version    = ""
 	buildinfos = ""
-	AppVersion = "RPKI API " + version + " " + buildinfos
+	AppVersion = "rpki-api " + version + " " + buildinfos
 
 	Addr        = flag.String("addr", ":8080", "Metrics address")
 	MetricsPath = flag.String("metrics.path", "/metrics", "Metrics path")
 	APIPath     = flag.String("graphql.path", "/api/graphql", "GraphQL path")
 
 	CacheBin        = flag.String("cache", "https://rpki.cloudflare.com/rpki.json", "URL of the cached JSON data")
-	UserAgent       = flag.String("useragent", fmt.Sprintf("RPKI-API (+https://github.com/lspgn/rpki-api)", AppVersion), "User-Agent header")
+	UserAgent       = flag.String("useragent", fmt.Sprintf("%v (+https://github.com/lspgn/rpki-api)", AppVersion), "User-Agent header")
 	RefreshInterval = flag.Int("refresh", 600, "Refresh interval in seconds")
 
 	GraphiQL = flag.Bool("graphiql", true, "Enable GraphiQL")
