@@ -1,0 +1,33 @@
+jobs:
+  include:
+    # Test
+    - stage: test
+      os: linux
+      language: go
+      env:
+        GO111MODULE=on
+      script:
+        - make test
+        - make vet
+    # Compile
+    - stage: compile
+      os: linux
+      language: go
+      env:
+        GO111MODULE=on
+        BUILDINFOSDET=-travis
+      before_install:
+        - sudo apt-get update
+      script:
+        - GOOS=linux make build
+        - GOOS=darwin make build
+      deploy:
+        provider: releases
+        api_key:
+          secure: EAzuJ5ubHy4Om2fVYq8EWaEjGg3aVsLRabZUbB4/ITqRsFkzi4XWQy2CQBEOnTo3ehDBz8ImjTHxBGLBIRYn1Jr5t4yYInuvz1umtuw6XECAeSWXw/+61Vriff2MstwFDZPvYeNzwk9UqRnRVoVO1I7O2rJ2mfeW7I5aVvydabxCnvFoW7M74Rp5+Wjm4xnicShppOjyFR2J31ueLEvuvqi+JWvcoU0VQctM2+GsOCs5Pu2iM1MhLOhNBm99FWWPA5dbVh4AkG0txdNtep/noj8IMq9QJHz1BLYkHBzmIx/KKgvIUt/S+feOnX3NGLgwqXKhgn9yUKIYODIzUhokH6rXpmWso8oaaMCX9OtH4X3rpNrNjzQznAFFlw7TJRXdDSYhMUvqMC3Pc573X7WztFdlNfE+2DzRr2oFU/cVJLbNWaWXg631qlEozHuq91Yj6T+ZmyeY1frTxiu/B2o9oZXCYlKWxnEjljiRevhGVwuU4gGwmAHjtqIDZVtraYaFa0d1xeV0IqNgXe8WrrZKUf962l9UJcnL8pkygJtdFaH2uPYGcoaoSxxeT/bc/a8FjCTR/hDw2SFX+vFZMHgBJuWD5vKQDiSt4hU6ri3TCMnO4i312po74ir1m9kqz7OV2dt4ik/71knKawhgejH9+xiNCMOhvnbpLCjq39yk620=
+        file_glob: true
+        file: dist/*
+        skip_cleanup: true
+        on:
+          tags: true
+          repo: lspgn/rpki-api
