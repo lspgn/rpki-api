@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -170,8 +169,7 @@ func processData(res *prefixfile.ROAList) ([]prefixfile.ROAJson, int, int, int) 
 	roalist := make([]prefixfile.ROAJson, 0)
 	for _, v := range res.Data {
 		_, prefix, _ := net.ParseCIDR(v.Prefix)
-		asnStr := v.ASN[2:len(v.ASN)]
-		asnInt, _ := strconv.ParseUint(asnStr, 10, 32)
+		asnInt := v.GetASN()
 		asn := uint32(asnInt)
 
 		count++
