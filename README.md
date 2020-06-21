@@ -153,7 +153,7 @@ Will return JSON
 }
 ```
 
-#### Query ROAs which do not cover any IP space
+#### Query ROAs which do not cover any BGP IP space
 
 ```graphql
 {
