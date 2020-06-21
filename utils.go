@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"github.com/cloudflare/gortr/prefixfile"
 	"net"
 )
 
@@ -24,7 +23,11 @@ func GetIPBroadcast(ipnet net.IPNet) net.IP {
 	return net.IP(br)
 }
 
-func MatchResource(v prefixfile.ROAJson, args map[string]interface{}) (bool, error) {
+type GetPrefixInterface interface {
+	GetPrefix() *net.IPNet
+}
+
+func MatchResource(v GetPrefixInterface, args map[string]interface{}) (bool, error) {
 	prefixFilter, err := CreatePrefixFilterFromArgs(args)
 	var add bool
 	if err == nil {

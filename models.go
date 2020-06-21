@@ -28,6 +28,7 @@ var (
 	)
 
 	RoaItemObject *graphql.Object
+	ROAsArgs      graphql.FieldConfigArgument
 	PrefixInput   = graphql.NewInputObject(graphql.InputObjectConfig{
 		Name: "PrefixArgs",
 		Fields: graphql.InputObjectConfigFieldMap{
@@ -101,31 +102,33 @@ func init() {
 		Fields: ROAItemFields,
 	})
 
+	ROAsArgs = graphql.FieldConfigArgument{
+		"prefixFilters": &graphql.ArgumentConfig{
+			Type:        PrefixInput,
+			Description: "Filter on prefix",
+		},
+		"ta": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "Filter on Trust Anchor",
+		},
+		"asn": &graphql.ArgumentConfig{
+			Type:        graphql.Float,
+			Description: "Filter on ASN",
+		},
+		"limit": &graphql.ArgumentConfig{
+			Type:        graphql.Int,
+			Description: "Limit number of results",
+		},
+		"offset": &graphql.ArgumentConfig{
+			Type:        graphql.Int,
+			Description: "Offset results",
+		},
+	}
+
 	Fields["roas"] = &graphql.Field{
 		Description: "List currently valid ROAs",
 		Type:        graphql.NewList(RoaItemObject),
-		Args: graphql.FieldConfigArgument{
-			"prefixFilters": &graphql.ArgumentConfig{
-				Type:        PrefixInput,
-				Description: "Filter on prefix",
-			},
-			"ta": &graphql.ArgumentConfig{
-				Type:        graphql.String,
-				Description: "Filter on Trust Anchor",
-			},
-			"asn": &graphql.ArgumentConfig{
-				Type:        graphql.Float,
-				Description: "Filter on ASN",
-			},
-			"limit": &graphql.ArgumentConfig{
-				Type:        graphql.Int,
-				Description: "Limit number of results",
-			},
-			"offset": &graphql.ArgumentConfig{
-				Type:        graphql.Int,
-				Description: "Offset results",
-			},
-		},
+		Args:        ROAsArgs,
 	}
 }
 

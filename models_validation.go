@@ -35,7 +35,7 @@ func init() {
 				output := p.Source.(OVResult)
 				return output.State, nil
 			},
-			Description: "List of files in the manifest",
+			Description: "Validation state",
 		},
 		"covering": &graphql.Field{
 			Type: graphql.NewList(RoaItemObject),
@@ -43,6 +43,7 @@ func init() {
 				output := p.Source.(OVResult)
 				return output.Covering, nil
 			},
+			Description: "List of covering ROAs",
 		},
 	}
 
