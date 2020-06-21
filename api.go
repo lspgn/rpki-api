@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,9 +12,6 @@ import (
 	"github.com/cloudflare/gortr/prefixfile"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"sort"
-	"strings"
-
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,7 +23,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -40,8 +42,18 @@ var (
 	MetricsPath = flag.String("metrics.path", "/metrics", "Metrics path")
 	APIPath     = flag.String("graphql.path", "/api/graphql", "GraphQL path")
 
-	CacheBin        = flag.String("cache", "https://rpki.cloudflare.com/rpki.json", "URL of the cached JSON data")
-	UserAgent       = flag.String("useragent", fmt.Sprintf("%v (+https://github.com/lspgn/rpki-api)", AppVersion), "User-Agent header")
+	CacheBin  = flag.String("cache", "https://rpki.cloudflare.com/rpki.json", "URL of the cached JSON data")
+	MimeType  = flag.String("mime", "application/json", "MIME header")
+	UserAgent = flag.String("useragent", fmt.Sprintf("%v (+https://github.com/lspgn/rpki-api)", AppVersion), "User-Agent header")
+
+	BGPEnable             = flag.Bool("bgp", false, "Enable BGP mapping")
+	BGPCache              = flag.String("bgp.cache", "./bgp.csv", "URL of the BGP cache (empty to disable)")
+	BGPType               = flag.String("bgp.format", "csv", "Format (CSV only)")
+	BGPParserCSVHdr       = flag.Bool("bgp.parser.csv.header", true, "Indicates if CSV contains a header ")
+	BGPParserCSVPrefix    = flag.Int("bgp.parser.csv.column.prefix", 0, "Column ID for prefix")
+	BGPParserCSVASN       = flag.Int("bgp.parser.csv.column.asn", 1, "Column ID for ASN")
+	BGPParserCSVSeparator = flag.String("bgp.parser.csv.separator", ",", "CSV separator")
+
 	RefreshInterval = flag.Int("refresh", 600, "Refresh interval in seconds")
 
 	GraphiQL = flag.Bool("graphiql", true, "Enable GraphiQL")
@@ -88,7 +100,7 @@ func initMetrics() {
 	prometheus.MustRegister(HttpRequestCount)
 }
 
-func fetchFile(file string, ua string) ([]byte, error) {
+func fetchFile(file string, ua string, mime string) ([]byte, error) {
 	var f io.Reader
 	var err error
 	if len(file) > 8 && (file[0:7] == "http://" || file[0:8] == "https://") {
@@ -114,7 +126,9 @@ func fetchFile(file string, ua string) ([]byte, error) {
 		client := &http.Client{Transport: tr}
 		req, err := http.NewRequest("GET", file, nil)
 		req.Header.Set("User-Agent", ua)
-		req.Header.Set("Accept", "text/json")
+		if mime != "" {
+			req.Header.Set("Accept", mime)
+		}
 
 		proxyurl, err := http.ProxyFromEnvironment(req)
 		if err != nil {
@@ -159,15 +173,15 @@ func decodeJSON(data []byte) (*prefixfile.ROAList, error) {
 	return &res, err
 }
 
-func processData(res *prefixfile.ROAList) ([]prefixfile.ROAJson, int, int, int) {
+func processData(res *prefixfile.ROAList) ([]*prefixfile.ROAJson, int, int, int) {
 	filterDuplicates := make(map[string]bool)
 
 	var count int
 	var countv4 int
 	var countv6 int
 
-	roalist := make([]prefixfile.ROAJson, 0)
-	for _, v := range res.Data {
+	roalist := make([]*prefixfile.ROAJson, 0)
+	for i, v := range res.Data {
 		_, prefix, _ := net.ParseCIDR(v.Prefix)
 		asnInt := v.GetASN()
 		asn := uint32(asnInt)
@@ -186,7 +200,7 @@ func processData(res *prefixfile.ROAList) ([]prefixfile.ROAJson, int, int, int) 
 		} else {
 			continue
 		}
-		roalist = append(roalist, v)
+		roalist = append(roalist, &(res.Data[i]))
 	}
 	return roalist, count, countv4, countv6
 }
@@ -201,9 +215,8 @@ func (e IdenticalFile) Error() string {
 
 func (s *state) updateFile(file string) error {
 	log.Debugf("Refreshing cache from %v", file)
-	data, err := fetchFile(file, s.userAgent)
+	data, err := fetchFile(file, s.userAgent, s.mime)
 	if err != nil {
-		log.Error(err)
 		return err
 	}
 	hsum, _ := checkFile(data)
@@ -255,7 +268,141 @@ func (s *state) updateFile(file string) error {
 	return nil
 }
 
-func (s *state) routineUpdate(file string, interval int) {
+type BGPRoute struct {
+	Prefix net.IP
+	ASN    uint32
+}
+
+func (s *state) updateFileBGP(file string) error {
+	log.Debugf("Refreshing BGP from %v", file)
+	data, err := fetchFile(file, s.userAgent, "text/csv")
+	if err != nil {
+		return err
+	}
+
+	rdr := csv.NewReader(bytes.NewBuffer(data))
+	csvcomma := s.CSVComma
+	if len(csvcomma) > 0 {
+		rdr.Comma = rune(csvcomma[0])
+	}
+
+	bgpRoutes := make([]*BGPOVResult, 0)
+
+	var itera int64
+	var record []string
+
+	regexNonCharacters, err := regexp.Compile("[^0-9]")
+	if err != nil {
+		return err
+	}
+
+	s.ovlock.RLock()
+	tmpOv := s.ov
+	s.ovlock.RUnlock()
+
+	roaCoversRoute := make(map[*prefixfile.ROAJson]bool)
+
+	for itera = 0; err == nil; itera++ {
+		record, err = rdr.Read()
+
+		if (s.CSVHeader && itera == 0) || len(record) == 0 || err != nil {
+			continue
+		}
+
+		if len(record) <= s.CSVColPrefix {
+			log.Errorf("Prefix index %d is above record length %d at line %d, skipping", s.CSVColPrefix, len(record), itera)
+			continue
+		}
+
+		var prefix *net.IPNet
+		prefixStr := record[s.CSVColPrefix]
+		_, prefix, err = net.ParseCIDR(prefixStr)
+		if err != nil {
+			log.Errorf("Could not decode prefix: %s at line %d: %v, skipping", prefixStr, itera, err)
+		}
+
+		if len(record) <= s.CSVColASN {
+			log.Errorf("ASN index %d is above record length %d at line %d, skipping", s.CSVColASN, len(record), itera)
+			continue
+		}
+
+		asnStr := record[s.CSVColASN]
+		asnR := regexNonCharacters.ReplaceAllString(asnStr, "")
+		if asnR == "" {
+			log.Errorf("Could not decode AS %s at line %d", asnStr, itera)
+			continue
+		}
+		asnI, _ := strconv.ParseInt(asnR, 10, 64)
+		asn := uint32(asnI)
+		log.Debugf("Adding BGP route %s %d", prefix, asn)
+
+		r := &BGPOVResult{
+			Prefix: prefixStr,
+			ASN:    asn,
+		}
+		if tmpOv != nil {
+			ovData := CreateValidationData(tmpOv, prefixStr, asn)
+			r.OV = ovData
+
+			for _, v := range ovData.Covering {
+				roaCoversRoute[v] = true
+				// could double check if the ROA ASN = 0 AND/OR nothing even invalid is covered
+			}
+		}
+
+		bgpRoutes = append(bgpRoutes, r)
+
+	}
+	if err != nil && err != io.EOF {
+		return err
+	}
+
+	sort.Slice(bgpRoutes, func(i, j int) bool {
+		return bytes.Compare(bgpRoutes[i].GetPrefix().IP, bgpRoutes[j].GetPrefix().IP) < 0
+	})
+
+	s.bgplock.Lock()
+	s.bgplist = bgpRoutes
+	s.bgplock.Unlock()
+
+	// Compute ROAs which do not cover any route
+	s.lock.RLock()
+	roalist := s.roalist
+	s.lock.RUnlock()
+
+	missinglist := make([]*prefixfile.ROAJson, 0)
+	for _, roa := range roalist {
+		if _, ok := roaCoversRoute[roa]; !ok {
+			missinglist = append(missinglist, roa)
+		}
+	}
+
+	s.missinglock.Lock()
+	s.missinglist = missinglist
+	s.missinglock.Unlock()
+
+	return nil
+}
+
+func (s *state) update(file string, fileBGP string) {
+	err := s.updateFile(file)
+	if err != nil {
+		switch err.(type) {
+		case IdenticalFile:
+			log.Info(err)
+		default:
+			log.Errorf("Error updating: %v", err)
+		}
+	}
+	if fileBGP != "" {
+		err = s.updateFileBGP(fileBGP)
+		if err != nil {
+			log.Errorf("Error updating BGP: %v", err)
+		}
+	}
+}
+
+func (s *state) routineUpdate(file string, fileBGP string, interval int) {
 	log.Debugf("Starting refresh routine (file: %v, interval: %vs)", file, interval)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGHUP)
@@ -267,26 +414,20 @@ func (s *state) routineUpdate(file string, interval int) {
 			log.Debug("Received HUP signal")
 		}
 		delay.Stop()
-		err := s.updateFile(file)
-		if err != nil {
-			switch err.(type) {
-			case IdenticalFile:
-				log.Info(err)
-			default:
-				log.Errorf("Error updating: %v", err)
-			}
-		}
+		s.update(file, fileBGP)
 	}
 }
 
-func (s *state) prepareOV(res []prefixfile.ROAJson) error {
+func (s *state) prepareOV(res []*prefixfile.ROAJson) error {
 	vrp := make([]ov.AbstractROA, 0)
 	for i := range res {
-		vrp = append(vrp, &(res[i]))
+		vrp = append(vrp, res[i])
 	}
 	ovData := ov.NewOV(vrp)
 
+	s.ovlock.Lock()
 	s.ov = ovData
+	s.ovlock.Unlock()
 	return nil
 }
 
@@ -329,7 +470,9 @@ func (s *state) ResolveValidation(p graphql.ResolveParams) (interface{}, error) 
 	prefixStr := p.Args["prefix"].(string)
 	asnConv := p.Args["asn"].(float64)
 	asn := uint32(asnConv)
+	s.ovlock.RLock()
 	tmpOv := s.ov
+	s.ovlock.RUnlock()
 
 	if tmpOv == nil {
 		return nil, nil
@@ -338,10 +481,75 @@ func (s *state) ResolveValidation(p graphql.ResolveParams) (interface{}, error) 
 	return CreateValidationData(tmpOv, prefixStr, asn), nil
 }
 
-func (s *state) Resolve(p graphql.ResolveParams) (interface{}, error) {
-	s.lock.RLock()
-	newlistTmp := s.roalist
-	s.lock.RUnlock()
+func (s *state) ResolveBGP(p graphql.ResolveParams) (interface{}, error) {
+	s.bgplock.RLock()
+	newlistTmp := s.bgplist
+	s.bgplock.RUnlock()
+
+	newlist := make([]*BGPOVResult, 0)
+
+	for i, v := range newlistTmp {
+		add := true
+		if add && p.Args["asn"] != nil {
+			add = false
+			if v.ASN == uint32(p.Args["asn"].(float64)) {
+				add = true
+			}
+		}
+		if add && p.Args["prefixFilters"] != nil {
+			add = false
+			tmpAdd, err := MatchResource(v, p.Args)
+			if err != nil {
+				return nil, err
+			}
+			add = tmpAdd
+		}
+		if add && p.Args["status"] != nil {
+			add = false
+			if v.OV.State == p.Args["status"].(int) {
+				add = true
+			}
+		}
+
+		if add {
+			newlist = append(newlist, newlistTmp[i])
+		}
+	}
+
+	minItem := 0
+	if p.Args["offset"] != nil && p.Args["offset"].(int) >= 0 && p.Args["offset"].(int) < len(newlist) {
+		minItem = p.Args["offset"].(int)
+	}
+
+	maxItem := len(newlist)
+	if p.Args["limit"] != nil && p.Args["limit"].(int)+minItem <= len(newlist) {
+		maxItem = minItem + p.Args["limit"].(int)
+	}
+
+	return newlist[minItem:maxItem], nil
+
+	return nil, nil
+}
+
+func (s *state) ResolveRegular(p graphql.ResolveParams) (interface{}, error) {
+	return s.Resolve(false, p)
+}
+
+func (s *state) ResolveMissing(p graphql.ResolveParams) (interface{}, error) {
+	return s.Resolve(true, p)
+}
+
+func (s *state) Resolve(missing bool, p graphql.ResolveParams) (interface{}, error) {
+	var newlistTmp []*prefixfile.ROAJson
+	if missing {
+		s.lock.RLock()
+		newlistTmp = s.missinglist
+		s.lock.RUnlock()
+	} else {
+		s.lock.RLock()
+		newlistTmp = s.roalist
+		s.lock.RUnlock()
+	}
 
 	newlist := make([]*prefixfile.ROAJson, 0)
 
@@ -370,7 +578,7 @@ func (s *state) Resolve(p graphql.ResolveParams) (interface{}, error) {
 		}
 
 		if add {
-			newlist = append(newlist, &(newlistTmp[i]))
+			newlist = append(newlist, newlistTmp[i])
 		}
 	}
 
@@ -393,10 +601,25 @@ type state struct {
 	lasthash      []byte
 	lastts        time.Time
 	userAgent     string
+	mime          string
 
 	lock    *sync.RWMutex
-	roalist []prefixfile.ROAJson
-	ov      *ov.OriginValidator
+	roalist []*prefixfile.ROAJson
+
+	missinglock *sync.RWMutex
+	missinglist []*prefixfile.ROAJson
+
+	ovlock *sync.RWMutex
+	ov     *ov.OriginValidator
+
+	bgplock *sync.RWMutex
+	bgplist []*BGPOVResult
+
+	// BGP
+	CSVComma     string
+	CSVColPrefix int
+	CSVColASN    int
+	CSVHeader    bool
 }
 
 type HandlerFunc interface {
@@ -439,13 +662,34 @@ func main() {
 
 	s := state{
 		userAgent: *UserAgent,
-		lock:      &sync.RWMutex{},
+		mime:      *MimeType,
+
+		lock:        &sync.RWMutex{},
+		missinglock: &sync.RWMutex{},
+		bgplock:     &sync.RWMutex{},
+		ovlock:      &sync.RWMutex{},
+
+		CSVComma:     *BGPParserCSVSeparator,
+		CSVHeader:    *BGPParserCSVHdr,
+		CSVColPrefix: *BGPParserCSVPrefix,
+		CSVColASN:    *BGPParserCSVASN,
+	}
+
+	if s.CSVColPrefix < 0 || s.CSVColASN < 0 || s.CSVColASN == s.CSVColPrefix {
+		log.Fatal("Error with column indices")
 	}
 
 	fieldsQuery := Fields
 
-	fieldsQuery["roas"].Resolve = s.Resolve
+	fieldsQuery["roas"].Resolve = s.ResolveRegular
 	fieldsQuery["validation"].Resolve = s.ResolveValidation
+	if *BGPEnable {
+		fieldsQuery["bgp"].Resolve = s.ResolveBGP
+		fieldsQuery["missing"].Resolve = s.ResolveMissing
+	} else {
+		delete(fieldsQuery, "bgp")
+		delete(fieldsQuery, "missing")
+	}
 
 	rootQuery := graphql.ObjectConfig{Name: "query", Fields: fieldsQuery}
 	schemaConfig := graphql.SchemaConfig{
@@ -471,16 +715,12 @@ func main() {
 	r.Handle(*APIPath, th)
 	r.Handle(*MetricsPath, promhttp.Handler())
 
-	err = s.updateFile(*CacheBin)
-	if err != nil {
-		switch err.(type) {
-		case IdenticalFile:
-			log.Info(err)
-		default:
-			log.Errorf("Error updating: %v", err)
-		}
+	if !*BGPEnable {
+		*BGPCache = ""
 	}
-	go s.routineUpdate(*CacheBin, *RefreshInterval)
+
+	s.update(*CacheBin, *BGPCache)
+	go s.routineUpdate(*CacheBin, *BGPCache, *RefreshInterval)
 
 	err = http.ListenAndServe(*Addr, r)
 	if err != nil {
