@@ -11,7 +11,6 @@ import (
 	"github.com/cloudflare/cfrpki/ov"
 	"github.com/cloudflare/gortr/prefixfile"
 	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
 	"github.com/prometheus/client_golang/prometheus"
@@ -711,9 +710,8 @@ func main() {
 		Handler: h,
 	}
 
-	r := mux.NewRouter()
-	r.Handle(*APIPath, th)
-	r.Handle(*MetricsPath, promhttp.Handler())
+	http.Handle(*APIPath, th)
+	http.Handle(*MetricsPath, promhttp.Handler())
 
 	if !*BGPEnable {
 		*BGPCache = ""
@@ -722,7 +720,7 @@ func main() {
 	s.update(*CacheBin, *BGPCache)
 	go s.routineUpdate(*CacheBin, *BGPCache, *RefreshInterval)
 
-	err = http.ListenAndServe(*Addr, r)
+	err = http.ListenAndServe(*Addr, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
