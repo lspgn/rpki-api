@@ -526,8 +526,6 @@ func (s *state) ResolveBGP(p graphql.ResolveParams) (interface{}, error) {
 	}
 
 	return newlist[minItem:maxItem], nil
-
-	return nil, nil
 }
 
 func (s *state) ResolveRegular(p graphql.ResolveParams) (interface{}, error) {
